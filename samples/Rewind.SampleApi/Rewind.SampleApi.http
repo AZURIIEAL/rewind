@@ -1,0 +1,6 @@
+@Rewind.SampleApi_HostAddress = http://localhost:5057
+
+GET {{Rewind.SampleApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -1,0 +1,6 @@
+{
+  "vsicons.customIconFolderPath": "<absolute-path-to-repo>/Assets/file-association/vscode-icons",
+  "vsicons.associations.files": [
+    { "icon": "rewind", "extensions": ["rewind"], "filename": false, "format": "png" }
+  ]
+}
