@@ -28,41 +28,108 @@ public class RewindArchiveWriter : IArchiveWriter
 
         Directory.CreateDirectory(_outputDirectory);
         var filePath = Path.Combine(_outputDirectory, $"{snapshot.Id}.rewind");
+        var tempPath = filePath + ".tmp";
 
         var maskedHttpContext = MaskHttpContext(snapshot.HttpContext);
+        var maskedException = MaskException(snapshot.Exception);
 
-        await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var archive = new ZipArchive(fileStream, ZipArchiveMode.Create);
+        // Write to a temp file and rename, so a half-written snapshot never shows up as a .rewind file.
+        await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var archive = new ZipArchive(fileStream, ZipArchiveMode.Create))
+        {
+            await WriteEntryAsync(archive, "manifest.json", BuildManifest(snapshot, maskedException), cancellationToken);
+            await WriteEntryAsync(archive, "http_context.json", JsonSerializer.Serialize(maskedHttpContext, SerializerOptions), cancellationToken);
+            await WriteEntryAsync(archive, "payload.json", maskedHttpContext.RawBodyPayload ?? string.Empty, cancellationToken);
+            await WriteEntryAsync(archive, "stacktrace.txt", BuildStackTrace(maskedException), cancellationToken);
+        }
 
-        await WriteEntryAsync(archive, "manifest.json", BuildManifest(snapshot), cancellationToken);
-        await WriteEntryAsync(archive, "http_context.json", JsonSerializer.Serialize(maskedHttpContext, SerializerOptions), cancellationToken);
-        await WriteEntryAsync(archive, "payload.json", maskedHttpContext.RawBodyPayload ?? string.Empty, cancellationToken);
-        await WriteEntryAsync(archive, "stacktrace.txt", BuildStackTrace(snapshot.Exception), cancellationToken);
-
+        File.Move(tempPath, filePath, overwrite: true);
         return filePath;
     }
 
     private HttpContextData MaskHttpContext(HttpContextData httpContext)
     {
+        var maskedRouteValues = _masker.MaskKeyValues(httpContext.RouteValues);
+
         return new HttpContextData
         {
             Method = httpContext.Method,
-            Path = httpContext.Path,
-            QueryString = httpContext.QueryString,
-            Headers = new Dictionary<string, string>(_masker.MaskHeaders(httpContext.Headers)),
-            RawBodyPayload = _masker.MaskJson(httpContext.RawBodyPayload)
+            Path = MaskPath(httpContext.Path, httpContext.RouteValues, maskedRouteValues),
+            QueryString = _masker.MaskQueryString(httpContext.QueryString),
+            RoutePattern = httpContext.RoutePattern,
+            RouteValues = new Dictionary<string, string>(maskedRouteValues),
+            Headers = new Dictionary<string, string>(_masker.MaskKeyValues(httpContext.Headers)),
+            RawBodyPayload = MaskBody(httpContext),
+            BodyOmittedReason = httpContext.BodyOmittedReason
         };
     }
 
-    private static string BuildManifest(RewindSnapshot snapshot)
+    private string? MaskBody(HttpContextData httpContext)
+    {
+        var contentType = httpContext.Headers
+            .FirstOrDefault(header => string.Equals(header.Key, "Content-Type", StringComparison.OrdinalIgnoreCase))
+            .Value;
+
+        if (httpContext.RawBodyPayload is not null &&
+            contentType?.Contains("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return _masker.MaskQueryString(httpContext.RawBodyPayload);
+        }
+
+        return _masker.MaskJson(httpContext.RawBodyPayload);
+    }
+
+    // Masks the path one segment at a time: a segment holding a sensitive route value (e.g. /reset/{token})
+    // gets that value's masked form, and every segment is also scanned for sensitive value patterns.
+    private string MaskPath(string path, IDictionary<string, string> routeValues, IDictionary<string, string> maskedRouteValues)
+    {
+        var replacements = routeValues
+            .Where(pair => pair.Value.Length > 0 && maskedRouteValues.TryGetValue(pair.Key, out var masked) && masked != pair.Value)
+            .GroupBy(pair => pair.Value)
+            .ToDictionary(group => group.Key, group => maskedRouteValues[group.First().Key]);
+
+        var segments = path.Split('/');
+        for (var i = 0; i < segments.Length; i++)
+        {
+            var decoded = Uri.UnescapeDataString(segments[i]);
+            var masked = _masker.MaskText(replacements.GetValueOrDefault(decoded, decoded));
+            if (masked != decoded)
+            {
+                segments[i] = Uri.EscapeDataString(masked);
+            }
+        }
+
+        return string.Join('/', segments);
+    }
+
+    // Exception messages often echo user input ("No user with email ..."), so they get the same free-text masking.
+    private ExceptionData? MaskException(ExceptionData? exception)
+    {
+        if (exception is null)
+        {
+            return null;
+        }
+
+        return new ExceptionData
+        {
+            Type = exception.Type,
+            Message = _masker.MaskText(exception.Message),
+            StackTrace = exception.StackTrace,
+            InnerException = MaskException(exception.InnerException)
+        };
+    }
+
+    private static string BuildManifest(RewindSnapshot snapshot, ExceptionData? exception)
     {
         var manifest = new RewindManifest
         {
             Id = snapshot.Id,
             Timestamp = snapshot.Timestamp,
             Environment = snapshot.Environment,
-            ExceptionType = snapshot.Exception?.Type,
-            ExceptionMessage = snapshot.Exception?.Message
+            ApplicationName = snapshot.ApplicationName,
+            TraceId = snapshot.TraceId,
+            ExceptionType = exception?.Type,
+            ExceptionMessage = exception?.Message
         };
 
         return JsonSerializer.Serialize(manifest, SerializerOptions);

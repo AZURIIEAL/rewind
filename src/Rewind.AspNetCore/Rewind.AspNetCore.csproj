@@ -13,6 +13,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageIcon>icon.png</PackageIcon>
+    <PackageId>Rewind.AspNetCore</PackageId>
+    <Description>Captures unhandled ASP.NET Core exceptions with a masked copy of the request into replayable .rewind files.</Description>
   </PropertyGroup>
 
   <ItemGroup>

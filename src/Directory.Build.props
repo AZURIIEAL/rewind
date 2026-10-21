@@ -1,0 +1,18 @@
+<Project>
+
+  <!-- Shared NuGet metadata for the packable projects under src/. CI overrides Version from the git tag. -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>AZURIIEAL</Authors>
+    <RepositoryUrl>https://github.com/AZURIIEAL/rewind</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/AZURIIEAL/rewind</PackageProjectUrl>
+    <PackageTags>aspnetcore;exceptions;debugging;replay;snapshot;masking;pii</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>

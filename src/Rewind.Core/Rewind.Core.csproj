@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageIcon>icon.png</PackageIcon>
+    <PackageId>Rewind.Core</PackageId>
+    <Description>Core models, PII masking engine and .rewind archive reader/writer for Rewind.</Description>
   </PropertyGroup>
 
   <ItemGroup>

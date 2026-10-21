@@ -10,6 +10,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageIcon>icon.png</PackageIcon>
+    <PackageId>Rewind.Cli</PackageId>
+    <Description>The rewind command-line tool: list, inspect, replay, export and generate tests from .rewind snapshots.</Description>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>rewind</ToolCommandName>
+    <!-- Let the tool run on newer .NET runtimes when 8.0 isn't installed. -->
+    <RollForward>Major</RollForward>
   </PropertyGroup>
 
   <ItemGroup>

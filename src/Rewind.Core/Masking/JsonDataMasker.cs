@@ -10,6 +10,7 @@ public class JsonDataMasker : IMasker
     private static readonly Regex CreditCardPattern = new(@"\b(?:\d[ -]?){12,18}\d\b", RegexOptions.Compiled);
     private static readonly Regex SsnPattern = new(@"\b\d{3}-?\d{2}-?\d{4}\b", RegexOptions.Compiled);
     private static readonly Regex EmailPattern = new(@"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", RegexOptions.Compiled);
+    private static readonly Regex DigitPattern = new(@"\d", RegexOptions.Compiled);
 
     private readonly MaskingOptions _options;
 
@@ -44,17 +45,52 @@ public class JsonDataMasker : IMasker
         return root.ToJsonString();
     }
 
-    public IDictionary<string, string> MaskHeaders(IDictionary<string, string> headers)
+    public string MaskText(string text) =>
+        _options.EnableMasking && !string.IsNullOrEmpty(text) ? MaskFreeText(text) : text;
+
+    public IDictionary<string, string> MaskKeyValues(IDictionary<string, string> values)
     {
-        var masked = new Dictionary<string, string>(headers.Count, StringComparer.OrdinalIgnoreCase);
-        foreach (var (key, value) in headers)
+        var masked = new Dictionary<string, string>(values.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, value) in values)
         {
-            masked[key] = _options.EnableMasking && IsSensitiveKey(key)
-                ? MaskValueForKey(key, value)
+            masked[key] = _options.EnableMasking
+                ? MaskStringValue(key, value)
                 : value;
         }
 
         return masked;
+    }
+
+    public string MaskQueryString(string queryString)
+    {
+        if (!_options.EnableMasking || string.IsNullOrEmpty(queryString))
+        {
+            return queryString;
+        }
+
+        var hasLeadingQuestionMark = queryString.StartsWith('?');
+        var pairs = (hasLeadingQuestionMark ? queryString[1..] : queryString).Split('&');
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            var separatorIndex = pairs[i].IndexOf('=');
+            if (separatorIndex < 0)
+            {
+                continue;
+            }
+
+            var rawKey = pairs[i][..separatorIndex];
+            var key = Uri.UnescapeDataString(rawKey.Replace('+', ' '));
+            var value = Uri.UnescapeDataString(pairs[i][(separatorIndex + 1)..].Replace('+', ' '));
+            var maskedValue = MaskStringValue(key, value);
+
+            // Only re-encode pairs that changed, so untouched parameters keep their original encoding.
+            if (maskedValue != value)
+            {
+                pairs[i] = $"{rawKey}={Uri.EscapeDataString(maskedValue)}";
+            }
+        }
+
+        return (hasLeadingQuestionMark ? "?" : string.Empty) + string.Join('&', pairs);
     }
 
     private void MaskNode(JsonNode node, string? parentKey)
@@ -90,8 +126,8 @@ public class JsonDataMasker : IMasker
             case JsonValue value when value.TryGetValue<string>(out var stringValue):
                 return MaskStringValue(key, stringValue);
 
-            case JsonValue when key is not null && IsSensitiveKey(key):
-                return "***MASKED***";
+            case JsonValue value when key is not null && IsSensitiveKey(key):
+                return MaskNonStringValue(value);
 
             default:
                 return child;
@@ -110,7 +146,12 @@ public class JsonDataMasker : IMasker
 
     private string MaskValueForKey(string key, string value)
     {
-        if (ContainsAny(key, "creditcard", "cardnumber", "cvv"))
+        if (ContainsAny(key, "cvv", "cvc"))
+        {
+            return MaskDigits(value);
+        }
+
+        if (ContainsAny(key, "creditcard", "cardnumber"))
         {
             return MaskCreditCard(value);
         }
@@ -130,7 +171,28 @@ public class JsonDataMasker : IMasker
             return "P@ssw0rd-Replaced1!";
         }
 
+        if (ContainsAny(key, "cookie"))
+        {
+            return MaskCookie(value);
+        }
+
+        if (ContainsAny(key, "authorization"))
+        {
+            return MaskAuthorization(value);
+        }
+
         return MaskGenericSecret(value);
+    }
+
+    // Keeps the JSON type so the payload still deserializes on replay: numbers keep their digit count, other values are left alone.
+    private static JsonNode? MaskNonStringValue(JsonValue value)
+    {
+        if (value.GetValueKind() != JsonValueKind.Number)
+        {
+            return value;
+        }
+
+        return JsonNode.Parse(MaskDigits(value.ToJsonString()));
     }
 
     private string MaskFreeText(string value)
@@ -142,10 +204,42 @@ public class JsonDataMasker : IMasker
     }
 
     private bool IsSensitiveKey(string key) =>
-        _options.SensitiveKeyWords.Any(keyword => key.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+        ContainsAny(key, _options.SensitiveKeyWords.ToArray());
 
-    private static bool ContainsAny(string key, params string[] fragments) =>
-        fragments.Any(fragment => key.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+    private static bool ContainsAny(string key, params string[] fragments)
+    {
+        var normalizedKey = NormalizeKey(key);
+        return fragments.Any(fragment => normalizedKey.Contains(NormalizeKey(fragment), StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeKey(string key) => key.Replace("-", string.Empty).Replace("_", string.Empty);
+
+    private static string MaskDigits(string value) => DigitPattern.Replace(value, "1");
+
+    // Masks each cookie value but keeps the names, so the header still parses into the same cookies on replay.
+    private static string MaskCookie(string value)
+    {
+        var cookies = value.Split(';');
+        for (var i = 0; i < cookies.Length; i++)
+        {
+            var separatorIndex = cookies[i].IndexOf('=');
+            if (separatorIndex >= 0)
+            {
+                cookies[i] = cookies[i][..(separatorIndex + 1)] + MaskGenericSecret(cookies[i][(separatorIndex + 1)..]);
+            }
+        }
+
+        return string.Join(';', cookies);
+    }
+
+    // Keeps the scheme ("Bearer", "Basic", ...) so a replayed request still reaches the same auth handler.
+    private static string MaskAuthorization(string value)
+    {
+        var spaceIndex = value.IndexOf(' ');
+        return spaceIndex > 0
+            ? value[..(spaceIndex + 1)] + MaskGenericSecret(value[(spaceIndex + 1)..])
+            : MaskGenericSecret(value);
+    }
 
     private static string MaskCreditCard(string value)
     {

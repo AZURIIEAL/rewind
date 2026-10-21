@@ -58,6 +58,54 @@ public class RewindArchiveWriterTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task WriteAsync_MasksQueryStringRouteValuesPathAndExceptionMessage()
+    {
+        var writer = new RewindArchiveWriter(_tempDirectory);
+        var snapshot = BuildSnapshot();
+        snapshot.Exception = ExceptionData.FromException(new InvalidOperationException("No user with email john.doe@example.com"));
+        snapshot.HttpContext.Path = "/reset/abc123secretvalue/users/123-45-6789";
+        snapshot.HttpContext.QueryString = "?api_key=livekey999&page=2";
+        snapshot.HttpContext.RouteValues = new Dictionary<string, string> { ["token"] = "abc123secretvalue", ["id"] = "123-45-6789" };
+
+        var filePath = await writer.WriteAsync(snapshot);
+        var contents = await new RewindArchiveReader().ReadAsync(filePath);
+
+        Assert.DoesNotContain("abc123secretvalue", contents.HttpContext.Path);
+        Assert.DoesNotContain("123-45-6789", contents.HttpContext.Path);
+        Assert.StartsWith("/reset/", contents.HttpContext.Path);
+        Assert.EndsWith("/users/XXX-XX-6789", contents.HttpContext.Path);
+        Assert.NotEqual("abc123secretvalue", contents.HttpContext.RouteValues["token"]);
+        Assert.DoesNotContain("livekey999", contents.HttpContext.QueryString);
+        Assert.DoesNotContain("john.doe@example.com", contents.Manifest.ExceptionMessage);
+        Assert.DoesNotContain("john.doe@example.com", contents.StackTrace);
+    }
+
+    [Fact]
+    public async Task WriteAsync_MasksFormEncodedBodyByFieldName()
+    {
+        var writer = new RewindArchiveWriter(_tempDirectory);
+        var snapshot = BuildSnapshot();
+        snapshot.HttpContext.Headers["Content-Type"] = "application/x-www-form-urlencoded";
+        snapshot.HttpContext.RawBodyPayload = "username=jdoe&password=hunter2";
+
+        var filePath = await writer.WriteAsync(snapshot);
+        var contents = await new RewindArchiveReader().ReadAsync(filePath);
+
+        Assert.StartsWith("username=jdoe&password=", contents.Payload);
+        Assert.DoesNotContain("hunter2", contents.Payload);
+    }
+
+    [Fact]
+    public async Task WriteAsync_LeavesNoTempFileBehind()
+    {
+        var writer = new RewindArchiveWriter(_tempDirectory);
+
+        await writer.WriteAsync(BuildSnapshot());
+
+        Assert.Empty(Directory.GetFiles(_tempDirectory, "*.tmp"));
+    }
+
     private static RewindSnapshot BuildSnapshot()
     {
         return new RewindSnapshot

@@ -47,6 +47,9 @@ app.MapPost("/boom", (BoomRequest request) =>
 
 app.Run();
 
+// Lets test projects reference Program (e.g. WebApplicationFactory<Program> in tests from `rewind generate-test`).
+public partial class Program { }
+
 record BoomRequest(string OrderId, string CardNumber, string Password);
 
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)

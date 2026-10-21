@@ -19,9 +19,21 @@ public static class InspectCommand
         Console.WriteLine($"Id:          {contents.Manifest.Id}");
         Console.WriteLine($"Timestamp:   {contents.Manifest.Timestamp:O}");
         Console.WriteLine($"Environment: {contents.Manifest.Environment}");
+        Console.WriteLine($"Application: {contents.Manifest.ApplicationName ?? "(unknown)"}");
+        Console.WriteLine($"Trace Id:    {contents.Manifest.TraceId ?? "(none)"}");
         Console.WriteLine($"Exception:   {contents.Manifest.ExceptionType}: {contents.Manifest.ExceptionMessage}");
         Console.WriteLine();
-        Console.WriteLine($"Request:     {contents.HttpContext.Method} {contents.HttpContext.Path}{contents.HttpContext.QueryString}");
+        Console.WriteLine($"Request:     {contents.HttpContext.Method} {SnapshotRequest.PathAndQuery(contents.HttpContext)}");
+        if (contents.HttpContext.RoutePattern is not null)
+        {
+            Console.WriteLine($"Route:       {contents.HttpContext.RoutePattern}");
+        }
+
+        foreach (var routeValue in contents.HttpContext.RouteValues)
+        {
+            Console.WriteLine($"  {{{routeValue.Key}}} = {routeValue.Value}");
+        }
+
         Console.WriteLine("Headers:");
         foreach (var header in contents.HttpContext.Headers)
         {
@@ -30,7 +42,8 @@ public static class InspectCommand
 
         Console.WriteLine();
         Console.WriteLine("Payload:");
-        Console.WriteLine(contents.Payload ?? "(none)");
+        Console.WriteLine(contents.Payload
+                          ?? (contents.HttpContext.BodyOmittedReason is { } reason ? $"(not captured: {reason})" : "(none)"));
         Console.WriteLine();
         Console.WriteLine("Stack Trace:");
         Console.WriteLine(contents.StackTrace);

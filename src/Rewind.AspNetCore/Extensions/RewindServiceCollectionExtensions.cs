@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Rewind.AspNetCore.Capture;
 using Rewind.AspNetCore.Middleware;
 using Rewind.AspNetCore.Options;
@@ -16,8 +17,10 @@ public static class RewindServiceCollectionExtensions
         configure?.Invoke(options);
 
         services.AddSingleton(options);
+        services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<IArchiveWriter>(new RewindArchiveWriter(options.OutputDirectory, new JsonDataMasker(options.Masking)));
         services.AddSingleton<RewindCaptureChannel>();
+        services.AddSingleton<RewindCaptureRateLimiter>();
         services.AddHostedService<RewindCaptureBackgroundService>();
 
         return services;
