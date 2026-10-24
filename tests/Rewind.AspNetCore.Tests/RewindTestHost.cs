@@ -23,10 +23,12 @@ public sealed class RewindTestHost : IAsyncDisposable
     }
 
     public string OutputDirectory { get; }
-    public List<Exception> EscapedExceptions { get; } = new();
+    public System.Collections.Concurrent.ConcurrentBag<Exception> EscapedExceptions { get; } = new();
     public HttpClient Client => _host.GetTestClient();
 
-    public static async Task<RewindTestHost> StartAsync(Action<RewindOptions>? configure = null)
+    public static async Task<RewindTestHost> StartAsync(
+        Action<RewindOptions>? configure = null,
+        Action<IServiceCollection>? configureServices = null)
     {
         var outputDirectory = Path.Combine(Path.GetTempPath(), "rewind-aspnetcore-tests-" + Guid.NewGuid().ToString("N"));
         RewindTestHost? testHost = null;
@@ -42,6 +44,7 @@ public sealed class RewindTestHost : IAsyncDisposable
                         options.OutputDirectory = outputDirectory;
                         configure?.Invoke(options);
                     });
+                    configureServices?.Invoke(services);
                 })
                 .Configure(app =>
                 {
@@ -54,7 +57,10 @@ public sealed class RewindTestHost : IAsyncDisposable
                         catch (Exception ex)
                         {
                             testHost!.EscapedExceptions.Add(ex);
-                            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                            if (!context.Response.HasStarted)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                            }
                         }
                     });
                     app.UseRewind();
@@ -68,6 +74,27 @@ public sealed class RewindTestHost : IAsyncDisposable
                             throw new InvalidOperationException("Reset failed"));
                         endpoints.MapPost("/upload", string () =>
                             throw new InvalidOperationException("Upload failed"));
+                        endpoints.MapPost("/text", string () =>
+                            throw new InvalidOperationException("Text failed"));
+                        endpoints.MapGet("/inner", string () =>
+                            throw new InvalidOperationException("outer", new FormatException("inner cause")));
+                        endpoints.MapGet("/late", async context =>
+                        {
+                            await context.Response.WriteAsync("partial response");
+                            await context.Response.Body.FlushAsync();
+                            throw new InvalidOperationException("Failed after response started");
+                        });
+                        // Simulates the client disconnecting: RequestAborted is signalled and the app's await throws.
+                        endpoints.MapGet("/abort", string (HttpContext context) =>
+                        {
+                            var disconnected = new CancellationTokenSource();
+                            disconnected.Cancel();
+                            context.RequestAborted = disconnected.Token;
+                            throw new OperationCanceledException(disconnected.Token);
+                        });
+                        // A cancellation the client didn't cause (e.g. an internal timeout) is a real bug.
+                        endpoints.MapGet("/timeout", string () =>
+                            throw new TaskCanceledException("Downstream call timed out"));
                         endpoints.MapGet("/throw/{kind}", string (string kind) => kind switch
                         {
                             "argument" => throw new ArgumentException("bad argument"),

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -10,7 +11,15 @@ public class JsonDataMasker : IMasker
     private static readonly Regex CreditCardPattern = new(@"\b(?:\d[ -]?){12,18}\d\b", RegexOptions.Compiled);
     private static readonly Regex SsnPattern = new(@"\b\d{3}-?\d{2}-?\d{4}\b", RegexOptions.Compiled);
     private static readonly Regex EmailPattern = new(@"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", RegexOptions.Compiled);
+    // Snapshots are files, never embedded in HTML, so keep non-ASCII text and <>&' readable instead of \uXXXX-escaping them.
+    private static readonly JsonSerializerOptions OutputOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
     private static readonly Regex DigitPattern = new(@"\d", RegexOptions.Compiled);
+
+    // Values this masker already produced. Recognising them keeps masking idempotent, so replaying a
+    // snapshot (and capturing the replay) doesn't turn "4111-XXXX-XXXX-1111" into a random-looking string.
+    private static readonly Regex MaskedCardPattern = new(@"^\d{4}(-X{1,4})+-\d{4}$", RegexOptions.Compiled);
+    private static readonly Regex MaskedSsnPattern = new(@"^XXX-XX-\d{4}$", RegexOptions.Compiled);
 
     private readonly MaskingOptions _options;
 
@@ -41,8 +50,13 @@ public class JsonDataMasker : IMasker
             return json;
         }
 
-        MaskNode(root, parentKey: null);
-        return root.ToJsonString();
+        if (root is JsonValue)
+        {
+            return MaskChild(key: null, root)?.ToJsonString(OutputOptions);
+        }
+
+        MaskNode(root, parentKey: null, sensitiveAncestorKey: null);
+        return root.ToJsonString(OutputOptions);
     }
 
     public string MaskText(string text) =>
@@ -93,14 +107,23 @@ public class JsonDataMasker : IMasker
         return (hasLeadingQuestionMark ? "?" : string.Empty) + string.Join('&', pairs);
     }
 
-    private void MaskNode(JsonNode node, string? parentKey)
+    // sensitiveAncestorKey is the nearest enclosing sensitive key (e.g. "credentials"), so every leaf beneath
+    // it is masked even when its own name looks harmless. Children are only reassigned when masking produced
+    // a new node: re-adding a node to the parent it already belongs to throws.
+    private void MaskNode(JsonNode node, string? parentKey, string? sensitiveAncestorKey)
     {
         switch (node)
         {
             case JsonObject obj:
                 foreach (var key in obj.Select(property => property.Key).ToList())
                 {
-                    obj[key] = MaskChild(key, obj[key]);
+                    var child = obj[key];
+                    var effectiveKey = sensitiveAncestorKey is not null && !IsSensitiveKey(key) ? sensitiveAncestorKey : key;
+                    var masked = MaskChild(effectiveKey, child);
+                    if (!ReferenceEquals(masked, child))
+                    {
+                        obj[key] = masked;
+                    }
                 }
 
                 break;
@@ -108,7 +131,12 @@ public class JsonDataMasker : IMasker
             case JsonArray array:
                 for (var i = 0; i < array.Count; i++)
                 {
-                    array[i] = MaskChild(parentKey, array[i]);
+                    var child = array[i];
+                    var masked = MaskChild(parentKey, child);
+                    if (!ReferenceEquals(masked, child))
+                    {
+                        array[i] = masked;
+                    }
                 }
 
                 break;
@@ -120,7 +148,7 @@ public class JsonDataMasker : IMasker
         switch (child)
         {
             case JsonObject or JsonArray:
-                MaskNode(child, key);
+                MaskNode(child, key, key is not null && IsSensitiveKey(key) ? key : null);
                 return child;
 
             case JsonValue value when value.TryGetValue<string>(out var stringValue):
@@ -197,7 +225,8 @@ public class JsonDataMasker : IMasker
 
     private string MaskFreeText(string value)
     {
-        var masked = CreditCardPattern.Replace(value, match => MaskCreditCard(match.Value));
+        // Real card numbers always pass the Luhn checksum; requiring it keeps timestamps and order numbers intact.
+        var masked = CreditCardPattern.Replace(value, match => IsLuhnValid(match.Value) ? MaskCreditCard(match.Value) : match.Value);
         masked = SsnPattern.Replace(masked, match => MaskSsn(match.Value));
         masked = EmailPattern.Replace(masked, match => MaskEmail(match.Value));
         return masked;
@@ -213,6 +242,30 @@ public class JsonDataMasker : IMasker
     }
 
     private static string NormalizeKey(string key) => key.Replace("-", string.Empty).Replace("_", string.Empty);
+
+    private static bool IsLuhnValid(string value)
+    {
+        var sum = 0;
+        var doubleDigit = false;
+        for (var i = value.Length - 1; i >= 0; i--)
+        {
+            if (!char.IsDigit(value[i]))
+            {
+                continue;
+            }
+
+            var digit = value[i] - '0';
+            if (doubleDigit && (digit *= 2) > 9)
+            {
+                digit -= 9;
+            }
+
+            sum += digit;
+            doubleDigit = !doubleDigit;
+        }
+
+        return sum % 10 == 0;
+    }
 
     private static string MaskDigits(string value) => DigitPattern.Replace(value, "1");
 
@@ -243,6 +296,11 @@ public class JsonDataMasker : IMasker
 
     private static string MaskCreditCard(string value)
     {
+        if (MaskedCardPattern.IsMatch(value))
+        {
+            return value;
+        }
+
         var digits = new string(value.Where(char.IsDigit).ToArray());
         if (digits.Length < 12)
         {
@@ -267,6 +325,11 @@ public class JsonDataMasker : IMasker
 
     private static string MaskSsn(string value)
     {
+        if (MaskedSsnPattern.IsMatch(value))
+        {
+            return value;
+        }
+
         var digits = new string(value.Where(char.IsDigit).ToArray());
         if (digits.Length != 9)
         {

@@ -131,19 +131,26 @@ public class RewindExceptionMiddleware
             return (null, null);
         }
 
-        request.Body.Position = 0;
-
         // Read one byte past the limit so a chunked body (no Content-Length) that's too large can be detected.
         var buffer = new byte[_options.MaxBodySizeBytes + 1];
         var total = 0;
-        int read;
-        while (total < buffer.Length && (read = await request.Body.ReadAsync(buffer.AsMemory(total), request.HttpContext.RequestAborted)) > 0)
+        try
         {
-            total += read;
-        }
+            request.Body.Position = 0;
+            int read;
+            while (total < buffer.Length && (read = await request.Body.ReadAsync(buffer.AsMemory(total), request.HttpContext.RequestAborted)) > 0)
+            {
+                total += read;
+            }
 
-        // Rewind it again for any outer handler that re-executes the pipeline (e.g. UseExceptionHandler).
-        request.Body.Position = 0;
+            // Rewind it again for any outer handler that re-executes the pipeline (e.g. UseExceptionHandler).
+            request.Body.Position = 0;
+        }
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or BadHttpRequestException or ObjectDisposedException)
+        {
+            // A body we can't read (client gone, malformed upload) shouldn't cost us the rest of the snapshot.
+            return (null, $"Body could not be read: {ex.Message}");
+        }
 
         if (total > _options.MaxBodySizeBytes)
         {

@@ -26,7 +26,8 @@ Prod app throws  →  RewindExceptionMiddleware  →  masked snapshot  →  {id}
 | `samples/Rewind.SampleApi` | A minimal API wired up with Rewind, used for manual testing. |
 | `tests/Rewind.Core.Tests` | Masking and archive reader/writer tests. |
 | `tests/Rewind.AspNetCore.Tests` | In-memory `TestServer` tests of the middleware, queue, rate limiter and retention. |
-| `tests/Rewind.Cli.Tests` | Replay, `.http` export and test-generator tests. |
+| `tests/Rewind.Cli.Tests` | Command tests, plus tests that run the built `rewind` binary as a separate process (exit codes, errors, replay against a real HTTP listener). |
+| `tests/Rewind.EndToEnd.Tests` | Runs the sample API in memory: capture → masked file → replay reproduces the same exception → a generated test is compiled with Roslyn and fails with the original error. |
 
 **Capture flow, in order:**
 

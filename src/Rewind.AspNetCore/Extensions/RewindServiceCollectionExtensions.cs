@@ -18,7 +18,12 @@ public static class RewindServiceCollectionExtensions
 
         services.AddSingleton(options);
         services.TryAddSingleton(TimeProvider.System);
-        services.AddSingleton<IArchiveWriter>(new RewindArchiveWriter(options.OutputDirectory, new JsonDataMasker(options.Masking)));
+        // Resolved from RewindOptions (not captured here) so a later registration can replace either one.
+        services.TryAddSingleton<IArchiveWriter>(serviceProvider =>
+        {
+            var resolved = serviceProvider.GetRequiredService<RewindOptions>();
+            return new RewindArchiveWriter(resolved.OutputDirectory, new JsonDataMasker(resolved.Masking));
+        });
         services.AddSingleton<RewindCaptureChannel>();
         services.AddSingleton<RewindCaptureRateLimiter>();
         services.AddHostedService<RewindCaptureBackgroundService>();

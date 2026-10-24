@@ -34,16 +34,25 @@ public class RewindArchiveWriter : IArchiveWriter
         var maskedException = MaskException(snapshot.Exception);
 
         // Write to a temp file and rename, so a half-written snapshot never shows up as a .rewind file.
-        await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
-        using (var archive = new ZipArchive(fileStream, ZipArchiveMode.Create))
+        try
         {
-            await WriteEntryAsync(archive, "manifest.json", BuildManifest(snapshot, maskedException), cancellationToken);
-            await WriteEntryAsync(archive, "http_context.json", JsonSerializer.Serialize(maskedHttpContext, SerializerOptions), cancellationToken);
-            await WriteEntryAsync(archive, "payload.json", maskedHttpContext.RawBodyPayload ?? string.Empty, cancellationToken);
-            await WriteEntryAsync(archive, "stacktrace.txt", BuildStackTrace(maskedException), cancellationToken);
+            await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var archive = new ZipArchive(fileStream, ZipArchiveMode.Create))
+            {
+                await WriteEntryAsync(archive, "manifest.json", BuildManifest(snapshot, maskedException), cancellationToken);
+                await WriteEntryAsync(archive, "http_context.json", JsonSerializer.Serialize(maskedHttpContext, SerializerOptions), cancellationToken);
+                await WriteEntryAsync(archive, "payload.json", maskedHttpContext.RawBodyPayload ?? string.Empty, cancellationToken);
+                await WriteEntryAsync(archive, "stacktrace.txt", BuildStackTrace(maskedException), cancellationToken);
+            }
+
+            File.Move(tempPath, filePath, overwrite: true);
+        }
+        catch
+        {
+            File.Delete(tempPath);
+            throw;
         }
 
-        File.Move(tempPath, filePath, overwrite: true);
         return filePath;
     }
 
@@ -167,7 +176,8 @@ public class RewindArchiveWriter : IArchiveWriter
     {
         var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
         await using var entryStream = entry.Open();
-        await using var writer = new StreamWriter(entryStream, Encoding.UTF8);
+        // No byte-order mark: payload.json etc. should be plain JSON for jq and other tools. (The reader still accepts one.)
+        await using var writer = new StreamWriter(entryStream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         await writer.WriteAsync(content.AsMemory(), cancellationToken);
     }
 }
