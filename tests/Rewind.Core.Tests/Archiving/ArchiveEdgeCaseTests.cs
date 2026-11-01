@@ -186,6 +186,70 @@ public class ArchiveEdgeCaseTests : IDisposable
         Assert.Equal("""{"password":"hunter2"}""", snapshot.HttpContext.RawBodyPayload);
     }
 
+    [Fact]
+    public async Task WritesASnapshotWithoutAnException()
+    {
+        var snapshot = BuildSnapshot();
+        snapshot.Exception = null;
+
+        var contents = await new RewindArchiveReader().ReadAsync(await new RewindArchiveWriter(_tempDirectory).WriteAsync(snapshot));
+
+        Assert.Null(contents.Manifest.ExceptionType);
+        Assert.Null(contents.Manifest.ExceptionMessage);
+        Assert.Equal(string.Empty, contents.StackTrace);
+        Assert.Equal("PUT", contents.HttpContext.Method);
+    }
+
+    [Fact]
+    public async Task GivesEverySnapshotItsOwnFile()
+    {
+        var writer = new RewindArchiveWriter(_tempDirectory);
+
+        var paths = await Task.WhenAll(Enumerable.Range(0, 20).Select(_ => writer.WriteAsync(BuildSnapshot())));
+
+        Assert.Equal(20, paths.Distinct().Count());
+        Assert.Equal(20, Directory.GetFiles(_tempDirectory, "*.rewind").Length);
+    }
+
+    [Fact]
+    public async Task MasksSecretsInInnerExceptionMessagesToo()
+    {
+        var exception = new InvalidOperationException(
+            "Charge failed",
+            new ArgumentException("Card 4111 1111 1111 1111 declined for jane.doe@example.com"));
+
+        var filePath = await new RewindArchiveWriter(_tempDirectory).WriteAsync(BuildSnapshot(exception));
+        var contents = await new RewindArchiveReader().ReadAsync(filePath);
+
+        Assert.DoesNotContain("4111 1111 1111 1111", contents.StackTrace);
+        Assert.DoesNotContain("jane.doe@", contents.StackTrace);
+        Assert.Contains("4111-XXXX-XXXX-1111", contents.StackTrace);
+        Assert.Contains("j***@example.com", contents.StackTrace);
+    }
+
+    [Fact]
+    public async Task RewritingTheReadBackSnapshot_ProducesTheSameContent()
+    {
+        // What happens when a replayed request fails again: the already-masked data goes through the writer a second time.
+        var snapshot = BuildSnapshot();
+        snapshot.HttpContext.Headers["Authorization"] = "Bearer real-token-123";
+        snapshot.HttpContext.Headers["Cookie"] = "session=abc; theme=dark";
+        snapshot.HttpContext.QueryString = "?token=t0k3n&page=2";
+        snapshot.HttpContext.RawBodyPayload = """{"cardNumber":"4111111111111111","ssn":"123-45-6789","password":"hunter2"}""";
+        var writer = new RewindArchiveWriter(_tempDirectory);
+        var first = await new RewindArchiveReader().ReadAsync(await writer.WriteAsync(snapshot));
+
+        var again = BuildSnapshot();
+        again.HttpContext.Headers = new Dictionary<string, string>(first.HttpContext.Headers);
+        again.HttpContext.QueryString = first.HttpContext.QueryString;
+        again.HttpContext.RawBodyPayload = first.Payload;
+        var second = await new RewindArchiveReader().ReadAsync(await writer.WriteAsync(again));
+
+        Assert.Equal(first.Payload, second.Payload);
+        Assert.Equal(first.HttpContext.QueryString, second.HttpContext.QueryString);
+        Assert.Equal(first.HttpContext.Headers, second.HttpContext.Headers);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempDirectory))

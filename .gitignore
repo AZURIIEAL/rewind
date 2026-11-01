@@ -26,3 +26,9 @@ Thumbs.db
 
 # Pack output
 artifacts/
+
+# Local Claude Code settings
+.claude/
+
+# Snapshots written by the sample API at runtime
+**/App_Data/

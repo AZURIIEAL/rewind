@@ -1,0 +1,12 @@
+@baseUrl = http://localhost:5000
+
+### Rewind snapshot 85d882bf578b4efc8645b1394f4adc30 - System.InvalidOperationException: Simulated failure for order ORD-42
+### Captured 2026-11-01T12:28:35.3746555+00:00 in Development
+POST {{baseUrl}}/boom?api_key=d4b2907e5c3a
+Accept: */*
+User-Agent: curl/8.14.1
+Authorization: Bearer d4b2907e5c3a18f6d4b
+Cookie: session=d4b2907e5c3a
+Content-Type: application/json
+
+{"orderId":"ORD-42","cardNumber":"4111-XXXX-XXXX-1111","password":"P@ssw0rd-Replaced1!"}

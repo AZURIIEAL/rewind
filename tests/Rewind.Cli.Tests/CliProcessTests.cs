@@ -242,6 +242,56 @@ public class CliProcessTests : IDisposable
         Assert.StartsWith("Error:", error);
     }
 
+    [Fact]
+    public async Task Replay_WarnsThatAnUncapturedBodyIsNotSent_ButStillReplays()
+    {
+        var snapshot = new RewindSnapshot
+        {
+            Exception = ExceptionData.FromException(new InvalidOperationException("upload failed")),
+            HttpContext = new HttpContextData
+            {
+                Method = "PUT",
+                Path = "/files/7",
+                Headers = new Dictionary<string, string> { ["Content-Type"] = "application/pdf" },
+                BodyOmittedReason = "Content type 'application/pdf' is not captured."
+            }
+        };
+        var file = await new RewindArchiveWriter(_directory).WriteAsync(snapshot);
+        var port = FreePort();
+        using var listener = new HttpListener();
+        listener.Prefixes.Add($"http://localhost:{port}/");
+        listener.Start();
+
+        var serverSide = Task.Run(async () =>
+        {
+            var context = await listener.GetContextAsync();
+            using var reader = new StreamReader(context.Request.InputStream);
+            var received = (context.Request.HttpMethod, context.Request.RawUrl, Body: await reader.ReadToEndAsync());
+            context.Response.StatusCode = 200;
+            context.Response.Close();
+            return received;
+        });
+
+        var (exitCode, output, error) = await RunCliAsync("replay", file, "--target", $"http://localhost:{port}");
+        var request = await serverSide;
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Warning: the original request body was not captured (Content type 'application/pdf' is not captured.)", error);
+        Assert.Contains("Status: 200 OK", output);
+        Assert.Equal(("PUT", "/files/7", string.Empty), request);
+    }
+
+    [Fact]
+    public async Task Inspect_WorksOnASnapshotWrittenByThisVersion_WithEveryOptionalFieldEmpty()
+    {
+        var file = await new RewindArchiveWriter(_directory).WriteAsync(new RewindSnapshot());
+
+        var (exitCode, _, error) = await RunCliAsync("inspect", file);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, error);
+    }
+
     private static int FreePort()
     {
         using var socket = new TcpListener(IPAddress.Loopback, 0);

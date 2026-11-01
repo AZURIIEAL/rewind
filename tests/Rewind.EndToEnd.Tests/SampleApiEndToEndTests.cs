@@ -97,6 +97,65 @@ public class SampleApiEndToEndTests : IDisposable
     }
 
     [Fact]
+    public async Task Replay_RecapturesTheSameMaskedSecrets_SoSnapshotsOfOneBugCanBeCompared()
+    {
+        var original = await CaptureBoomAsync();
+        File.Delete(Directory.GetFiles(_outputDirectory, "*.rewind")[0]);
+
+        await using (var factory = CreateFactory())
+        {
+            using var request = ReplayCommand.BuildRequest(original, "http://localhost");
+            await factory.CreateClient().SendAsync(request);
+        }
+
+        var replayed = await new RewindArchiveReader().ReadAsync(Assert.Single(Directory.GetFiles(_outputDirectory, "*.rewind")));
+        Assert.Equal(original.HttpContext.QueryString, replayed.HttpContext.QueryString);
+        Assert.Equal(original.HttpContext.Headers["Authorization"], replayed.HttpContext.Headers["Authorization"]);
+        Assert.Equal(original.HttpContext.Headers["Cookie"], replayed.HttpContext.Headers["Cookie"]);
+        Assert.Equal(original.HttpContext.Method, replayed.HttpContext.Method);
+        Assert.NotEqual(original.Manifest.Id, replayed.Manifest.Id);
+    }
+
+    [Fact]
+    public async Task Capture_RecordsOnlyTheFailingRequest_WhenHealthyAndFailingRequestsInterleave()
+    {
+        await using (var factory = CreateFactory())
+        {
+            var client = factory.CreateClient();
+            for (var i = 0; i < 5; i++)
+            {
+                Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/weatherforecast")).StatusCode);
+            }
+
+            var failed = await client.PostAsync("/boom", new StringContent(SecretPayload, Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/weatherforecast")).StatusCode);
+        }
+
+        var snapshot = await new RewindArchiveReader().ReadAsync(Assert.Single(Directory.GetFiles(_outputDirectory, "*.rewind")));
+        Assert.Equal("/boom", snapshot.HttpContext.Path);
+    }
+
+    [Fact]
+    public async Task GeneratedTest_EscapesAwkwardHeaderValues_AndStillReproducesTheFailure()
+    {
+        var snapshot = await CaptureBoomAsync();
+        snapshot.HttpContext.Headers["X-Note"] = "say \"hi\" from C:\\temp\\new\tthen tab";
+        snapshot.HttpContext.Headers["X-Empty"] = "";
+
+        var code = GenerateTestCommand.Build(snapshot, "SampleApi.ReplayTests", "Program");
+        var assembly = Compile(code);
+        var testClass = assembly.GetTypes().Single(type => type.Name.StartsWith("RewindReplay_"));
+        var testMethod = testClass.GetMethods().Single(method => method.GetCustomAttribute<FactAttribute>() is not null);
+
+        await using var factory = CreateFactory();
+        var instance = Activator.CreateInstance(testClass, factory)!;
+
+        var failure = await Assert.ThrowsAsync<Xunit.Sdk.TrueException>(() => (Task)testMethod.Invoke(instance, null)!);
+        Assert.Contains("Simulated failure for order ORD-42", failure.Message);
+    }
+
+    [Fact]
     public async Task GeneratedTest_CompilesWithoutImplicitUsings_AndFailsWithTheOriginalError()
     {
         var snapshot = await CaptureBoomAsync();

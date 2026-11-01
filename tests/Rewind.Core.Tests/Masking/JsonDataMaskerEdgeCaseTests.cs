@@ -243,6 +243,55 @@ public class JsonDataMaskerEdgeCaseTests
         Assert.Equal(headers, result);
     }
 
+    [Theory]
+    [InlineData("cardNumber", "1234")]          // too short to be a card
+    [InlineData("ssn", "12-34")]                 // wrong digit count for an SSN
+    [InlineData("creditCard", "on file")]
+    public void MaskJson_FallsBackToAGenericSecret_WhenAKeyedValueDoesNotLookLikeItsType(string key, string value)
+    {
+        var json = $$"""{"{{key}}":"{{value}}"}""";
+
+        var masked = (string?)JsonNode.Parse(_masker.MaskJson(json)!)![key];
+
+        Assert.NotEqual(value, masked);
+        Assert.True(masked!.Length >= 12, "generic secrets have a minimum length so short values aren't guessable");
+        Assert.Equal(masked, (string?)JsonNode.Parse(_masker.MaskJson(json)!)![key]);
+    }
+
+    [Fact]
+    public void MaskJson_MasksEmailsKeepingTheDomain_WhenEmailIsAConfiguredKeyword()
+    {
+        var masker = new JsonDataMasker(new MaskingOptions { SensitiveKeyWords = { "email" } });
+
+        var result = JsonNode.Parse(masker.MaskJson("""{"email":"john@example.com","backupEmail":"not-an-address"}""")!)!;
+
+        Assert.Equal("j***@example.com", (string?)result["email"]);
+        Assert.NotEqual("not-an-address", (string?)result["backupEmail"]);
+        Assert.DoesNotContain("@", (string?)result["backupEmail"]);
+    }
+
+    [Theory]
+    [InlineData("api_key")]
+    [InlineData("x-api-key")]
+    [InlineData("Credit_Card")]
+    [InlineData("SESSION")]
+    public void MaskJson_MatchesSensitiveKeysIgnoringCaseAndSeparators(string key)
+    {
+        var json = $$"""{"{{key}}":"value-that-must-not-leak"}""";
+
+        Assert.DoesNotContain("value-that-must-not-leak", _masker.MaskJson(json));
+    }
+
+    [Fact]
+    public void MaskJson_PreservesPropertyOrder_SoDiffsAgainstTheOriginalStayReadable()
+    {
+        var json = """{"z":1,"password":"x","a":2,"token":"y","m":3}""";
+
+        var keys = JsonNode.Parse(_masker.MaskJson(json)!)!.AsObject().Select(property => property.Key);
+
+        Assert.Equal(new[] { "z", "password", "a", "token", "m" }, keys);
+    }
+
     [Fact]
     public void Masking_CanBeDisabledForEveryEntryPoint()
     {

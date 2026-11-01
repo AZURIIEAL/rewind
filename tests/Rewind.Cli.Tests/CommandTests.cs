@@ -51,6 +51,33 @@ public class CommandTests
     }
 
     [Fact]
+    public void CliArgs_AcceptsOptionsBeforeThePath_AndIgnoresOptionCase()
+    {
+        var (path, options) = CliArgs.ParsePathAndOptions(new[] { "--TARGET", "http://x", "file.rewind", "extra" });
+
+        Assert.Equal("file.rewind", path);
+        Assert.Equal("http://x", options["target"]);
+    }
+
+    [Fact]
+    public void CliArgs_GivesATrailingOptionAnEmptyValue()
+    {
+        var (path, options) = CliArgs.ParsePathAndOptions(new[] { "file.rewind", "--out" });
+
+        Assert.Equal("file.rewind", path);
+        Assert.Equal(string.Empty, options["out"]);
+    }
+
+    [Fact]
+    public void CliArgs_HandlesNoArguments()
+    {
+        var (path, options) = CliArgs.ParsePathAndOptions(Array.Empty<string>());
+
+        Assert.Null(path);
+        Assert.Empty(options);
+    }
+
+    [Fact]
     public async Task Replay_BuildRequest_ReproducesCapturedRequestAgainstTarget()
     {
         string? receivedBody = null;

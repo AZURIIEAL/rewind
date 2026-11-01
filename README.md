@@ -2,9 +2,9 @@
 
 ![Rewind](Assets/readme/banner-960.png)
 
-Rewind captures unhandled exceptions in an ASP.NET Core app — the HTTP request that
-triggered them, the stack trace, and a **masked** copy of the request — and packages
-each one into a `.rewind` file. The `rewind` CLI can then inspect that file, replay
+Rewind captures unhandled exceptions in an ASP.NET Core app. For each one it saves the
+HTTP request that caused it, the stack trace and a **masked** copy of the request body,
+and packages them into a `.rewind` file. The `rewind` CLI can then inspect that file, replay
 the exact request against your app running locally, or turn it into a failing xUnit
 test, so you can reproduce a production bug and hit breakpoints in your IDE without
 ever touching real user data.
@@ -38,7 +38,7 @@ Prod app throws  →  RewindExceptionMiddleware  →  masked snapshot  →  {id}
    per-exception rate limit, re-reads the buffered body, builds a `RewindSnapshot`
    (method, path, route pattern and values, query string, headers, body, exception
    chain, trace id) and puts it on a bounded in-memory queue. Then it **rethrows the
-   original exception** — Rewind never swallows or alters your app's error handling,
+   original exception**. Rewind never swallows or changes your app's error handling,
    and if capturing itself fails, that failure is logged and ignored.
 3. A background hosted service (`RewindCaptureBackgroundService`) drains the queue
    off the request thread, masks sensitive data, writes a `{id}.rewind` file, and
@@ -48,7 +48,7 @@ Prod app throws  →  RewindExceptionMiddleware  →  masked snapshot  →  {id}
 **Masking**, done by `JsonDataMasker` before anything is written to disk:
 - Matches sensitive **keys** by name (`password`, `secret`, `token`, `ssn`, `cvv`,
   `cvc`, `creditcard`, `cardnumber`, `authorization`, `apikey`, `cookie`, `session`,
-  `credential` by default — configurable). Matching ignores case, `-` and `_`, so
+  `credential` by default, and you can add your own). Matching ignores case, `-` and `_`, so
   `apikey` also catches `X-Api-Key` and `api_key`.
 - Also scans every string **value** with regex, independent of key name, so a field
   like `taxId` still gets caught if it holds an SSN-shaped value.
@@ -67,12 +67,12 @@ Prod app throws  →  RewindExceptionMiddleware  →  masked snapshot  →  {id}
   other text bodies (by value pattern), and exception messages (by value pattern).
 
 **The `.rewind` file** is a ZIP containing:
-- `manifest.json` — format version, id, timestamp, environment, application name,
+- `manifest.json`: format version, id, timestamp, environment, application name,
   trace id, exception type/message
-- `http_context.json` — method, path, query string, route pattern/values, masked
+- `http_context.json`: method, path, query string, route pattern/values, masked
   headers, masked body, and why the body was left out (if it was)
-- `payload.json` — the masked request body on its own
-- `stacktrace.txt` — full exception text, recursing through inner exceptions
+- `payload.json`: the masked request body on its own
+- `stacktrace.txt`: full exception text, recursing through inner exceptions
 
 ## Requirements
 
@@ -87,25 +87,101 @@ dotnet build Rewind.sln
 dotnet test Rewind.sln
 ```
 
-## Try it end-to-end with the sample API
+## How to test it manually
+
+This walks through the whole Rewind loop by hand: crash the sample API, look at the
+masked snapshot, then reproduce the crash three ways. You need two terminals.
+
+### 1. Start the sample API (terminal 1)
 
 ```bash
 cd samples/Rewind.SampleApi
-dotnet run
+dotnet run --urls http://localhost:5057
 ```
 
-Note the port it prints (e.g. `http://localhost:5057`), then in another terminal:
+Snapshots are written to `App_Data/rewind/` under the directory you start the API
+from, which is why you `cd` into the sample first.
+
+### 2. Make it crash (terminal 2)
 
 ```bash
-curl -X POST http://localhost:5057/boom \
+curl -i -X POST "http://localhost:5057/boom?api_key=livekey999" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer supersecrettoken123" \
+  -H "Cookie: session=sess777abc" \
   -d '{"orderId":"ORD-42","cardNumber":"4111111111111111","password":"hunter2"}'
 ```
 
-This deliberately throws, so you'll get a `500` back — that's expected. A `.rewind`
-file will appear under `samples/Rewind.SampleApi/App_Data/rewind/`. You can also
-trigger it from the browser via Swagger at `http://localhost:5057/swagger`.
+`/boom` always throws, so the `500` is expected. Terminal 1 logs
+`Rewind snapshot ... written to ...`. You can also send the request from Swagger at
+http://localhost:5057/swagger: open **POST /boom**, then **Try it out** and **Execute**.
+
+For contrast, `curl http://localhost:5057/weatherforecast` succeeds and saves nothing.
+
+### 3. Look at the snapshot
+
+Run these from the repo root. If you haven't installed `rewind` as a tool (see
+[Using the CLI](#using-the-cli)), this alias runs it straight from the source:
+
+```bash
+alias rewind="dotnet run --project src/Rewind.Cli --"
+```
+
+Then list the captured crashes and open the newest one:
+
+```bash
+rewind list samples/Rewind.SampleApi/App_Data/rewind
+F=$(ls -t samples/Rewind.SampleApi/App_Data/rewind/*.rewind | head -1)
+rewind inspect $F
+```
+
+Check that the secrets were masked before anything reached disk:
+
+| Sent | Saved as |
+|---|---|
+| `"cardNumber":"4111111111111111"` | `"cardNumber":"4111-XXXX-XXXX-1111"` |
+| `"password":"hunter2"` | `"password":"P@ssw0rd-Replaced1!"` |
+| `Bearer supersecrettoken123` | `Bearer ` followed by scrambled text |
+| `session=sess777abc`, `api_key=livekey999` | the name kept, the value scrambled |
+
+`orderId`, the URL and the exception message (`Simulated failure for order ORD-42`)
+are kept, so the failure can still be reproduced.
+
+### 4. Reproduce the crash
+
+**Replay it against the running API:**
+
+```bash
+rewind replay $F --target http://localhost:5057
+```
+
+The API answers with the same `500` and `Simulated failure for order ORD-42`. The
+replay crashes the API again, so a second snapshot shows up when you run `rewind list` again.
+
+**Export it as a `.http` request:**
+
+```bash
+rewind export-http $F --output artifacts/crash.http
+```
+
+Open `artifacts/crash.http` in VS Code (with the REST Client extension) or in Rider
+and click **Send Request**.
+
+**Generate a regression test:**
+
+```bash
+rewind generate-test $F --output artifacts/ReplayTest.cs --namespace SampleApi.Tests --entry-point Program
+```
+
+This writes an xUnit test that sends the captured request into the app through
+`WebApplicationFactory<Program>`. While the bug exists the test fails with the
+original error; once you fix the bug, it passes. Copy it into a test project that
+references `Microsoft.AspNetCore.Mvc.Testing` and the API project to run it.
+
+### 5. Clean up
+
+Stop the API with <kbd>Ctrl</kbd>+<kbd>C</kbd>. Snapshots in `App_Data/` and files in
+`artifacts/` are ignored by git, so you can leave them or delete them whenever you like.
 
 ## Integrating Rewind into your own project
 
@@ -145,7 +221,7 @@ app.Run();
 
 `AddRewind` registers the archive writer, the capture queue, the rate limiter and the
 background writer service as singletons. `UseRewind` adds `RewindExceptionMiddleware`
-to the pipeline. Nothing else is required — snapshots start appearing in
+to the pipeline. That's all you need. Snapshots start appearing in
 `options.OutputDirectory` the first time an unhandled exception occurs.
 
 ### Options
@@ -201,7 +277,7 @@ Prints the manifest, request line, route, headers, masked payload, and stack tra
 
 Rebuilds the exact HTTP request (method, path, query string, headers, masked body)
 and sends it to `--target` (default `http://localhost:5000`). Prints the response
-status and body — point it at your app running locally to reproduce the failure live.
+status and body. Point it at your app running locally to reproduce the failure live.
 
 ```bash
 rewind replay samples/Rewind.SampleApi/App_Data/rewind/<id>.rewind --target http://localhost:5057
@@ -217,7 +293,7 @@ VS Code (REST Client extension) or Visual Studio 2022 17.8+ and click "Send Requ
 
 Writes an xUnit test that sends the captured request through `WebApplicationFactory`
 and asserts the response isn't a 5xx. It fails while the bug reproduces and passes
-once it's fixed, so it doubles as a regression test — and you can debug it to step
+once it's fixed, so it doubles as a regression test. You can also debug it to step
 through the original failure.
 
 ```bash
@@ -238,7 +314,7 @@ Prints command usage.
 
 `Assets/icons/` includes a dedicated `.rewind` file glyph, and `Assets/file-association/`
 has setup scripts for the three places you're likely to see the file listed. All are
-optional and per-user — none require touching the repo itself.
+optional and per-user, and none of them change the repo itself.
 
 ### VS Code Explorer
 
@@ -252,19 +328,24 @@ optional and per-user — none require touching the repo itself.
 
 **If you use [Material Icon Theme](https://marketplace.visualstudio.com/items?itemName=PKief.material-icon-theme):**
 
-Material Icon Theme's `files.associations` setting only remaps to icon names from
-its own built-in set — it can't point at an arbitrary custom image. Instead:
-
 ```bash
 cd Assets/file-association/vscode-material-icon-theme
-./patch-material-icon-theme.sh
+./install-rewind-icon.sh
 ```
 
-This drops the icon into the installed extension's own `icons/` folder and adds one
-entry to its generated theme JSON (backing up the original first). Reload VS Code
-(**Developer: Reload Window**) afterward. Run `restore-material-icon-theme.sh` to
-revert. **Caveat:** a Material Icon Theme extension update will overwrite the patch
-— just re-run the script to reapply it.
+This uses the theme's supported custom-SVG feature. It copies
+`Assets/icons/rewind-file.svg` to `~/.vscode/extensions/rewind-icons/` and adds this
+to your user `settings.json`:
+
+```json
+"material-icon-theme.files.associations": {
+    "*.rewind": "../../rewind-icons/rewind-file"
+}
+```
+
+Then run **Developer: Reload Window**. The setting survives Material Icon Theme
+updates. If your `settings.json` has comments the script can't parse, it prints the
+snippet for you to add by hand. Run `uninstall-rewind-icon.sh` to revert.
 
 ### Windows Explorer
 
@@ -274,8 +355,8 @@ cd Assets\file-association\windows
 ```
 
 Registers `.rewind` under `HKEY_CURRENT_USER` with a `DefaultIcon` pointing at
-`Assets\icons\rewind-file.ico` — no admin rights needed, and it doesn't change what
-app opens the file, only the icon shown. Run `unregister-rewind-icon.ps1` to revert.
+`Assets\icons\rewind-file.ico`. It doesn't need admin rights, and it only changes the
+icon, not which app opens the file. Run `unregister-rewind-icon.ps1` to revert.
 
 ### macOS Finder
 
@@ -286,8 +367,8 @@ cd Assets/file-association/macos
 
 Builds a minimal helper app bundle (never launched) that declares ownership of the
 `.rewind` type and its icon, and registers it with Launch Services. Run
-`unregister-rewind-icon.sh` to revert. Must be run on macOS itself — it relies on
-`sips` and `iconutil`.
+`unregister-rewind-icon.sh` to revert. Run it on a Mac, since it uses `sips` and
+`iconutil`.
 
 ### Linux (GNOME/Nautilus, KDE/Dolphin, etc.)
 
@@ -298,8 +379,8 @@ cd Assets/file-association/linux
 
 Registers `.rewind` as a freedesktop.org shared-mime-info type
 (`application/x-rewind-snapshot`) and installs the icon into
-`~/.local/share/icons/hicolor` at all standard sizes — the same mechanism every
-Linux file manager uses to pick file icons. Per-user, no root needed. Run
+`~/.local/share/icons/hicolor` at all standard sizes. Every Linux file manager uses
+this to pick file icons. Per-user, no root needed. Run
 `unregister-rewind-icon.sh` to revert.
 
 ## Releasing
@@ -313,7 +394,7 @@ with that version, using a `NUGET_API_KEY` repository secret.
 
 - Masking is pattern- and name-based. A sensitive value under an innocuous key name
   that doesn't look like a card, SSN or email (e.g. `"notes": "my PIN is 1234"`) isn't
-  caught — add your own key names to `Masking.SensitiveKeyWords`.
+  caught. Add your own key names to `Masking.SensitiveKeyWords` for cases like that.
 - Multipart and binary bodies aren't captured (the snapshot notes that the body was
   left out), so replays of file uploads are sent without a body.
 - Bodies sent with chunked encoding (no `Content-Length`) are buffered by ASP.NET Core
